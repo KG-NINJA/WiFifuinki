@@ -1,4 +1,5 @@
 # KEHAI Indicator – Prototype
+No personal data is collected or transmitted.
 
 A minimal, mystical pavilion-style UI prototype that visualizes an abstract **sense of presence (Kehai)** as ambient motion and light.
 
