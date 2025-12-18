@@ -12,6 +12,7 @@ It does not detect people or objects.
 - The UI is driven only by a single state variable: `kehaiState = "calm" | "active" | "surge"`.
 - Each state changes animation speed, glow intensity, and particle motion.
 - There are no numbers, labels, icons, or on-screen text in the UI.
+- An ambient, music-like sound layer is generated locally with the Web Audio API and follows the same state + breathing rhythm (starts only after a user interaction due to browser autoplay policies).
 
 ## Future AI / Wi‑Fi sensing connection (not implemented yet)
 
@@ -42,4 +43,3 @@ python3 -m http.server 8000
 ```
 
 Then visit `http://localhost:8000`.
-

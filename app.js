@@ -12,6 +12,263 @@ const ctx = canvas.getContext("2d", { alpha: false });
 
 const TAU = Math.PI * 2;
 
+function createSoundEngine() {
+  /** @type {AudioContext | null} */
+  let ac = null;
+  /** @type {GainNode | null} */
+  let master = null;
+  /** @type {DynamicsCompressorNode | null} */
+  let comp = null;
+  /** @type {BiquadFilterNode | null} */
+  let tilt = null;
+  /** @type {GainNode | null} */
+  let padGain = null;
+  /** @type {GainNode | null} */
+  let noiseGain = null;
+  /** @type {DelayNode | null} */
+  let delay = null;
+  /** @type {GainNode | null} */
+  let feedback = null;
+  /** @type {BiquadFilterNode | null} */
+  let delayFilter = null;
+  /** @type {GainNode | null} */
+  let delaySend = null;
+
+  /** @type {{ osc: OscillatorNode, gain: GainNode, filter: BiquadFilterNode, lfo: OscillatorNode, lfoGain: GainNode }[] | null} */
+  let voices = null;
+
+  /** @type {AudioBufferSourceNode | null} */
+  let noiseSrc = null;
+  /** @type {BiquadFilterNode | null} */
+  let noiseFilter = null;
+
+  let started = false;
+
+  const chord = {
+    calm: [110, 165, 220],
+    active: [110, 165, 220, 330],
+    surge: [110, 165, 220, 330, 440],
+  };
+
+  function now() {
+    return ac ? ac.currentTime : 0;
+  }
+
+  function softSet(param, value, timeConstant = 0.12) {
+    if (!ac) return;
+    const t = now();
+    param.cancelScheduledValues(t);
+    param.setTargetAtTime(value, t, timeConstant);
+  }
+
+  function makeNoiseBuffer(context) {
+    const seconds = 2.0;
+    const frames = Math.floor(context.sampleRate * seconds);
+    const buf = context.createBuffer(1, frames, context.sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < frames; i++) {
+      const x = (Math.random() * 2 - 1) * 0.9;
+      ch[i] = x;
+    }
+    return buf;
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    ac = new AudioCtx();
+
+    master = ac.createGain();
+    master.gain.value = 0.0;
+
+    comp = ac.createDynamicsCompressor();
+    comp.threshold.value = -24;
+    comp.knee.value = 26;
+    comp.ratio.value = 3.0;
+    comp.attack.value = 0.012;
+    comp.release.value = 0.24;
+
+    tilt = ac.createBiquadFilter();
+    tilt.type = "lowpass";
+    tilt.frequency.value = 12000;
+    tilt.Q.value = 0.35;
+
+    padGain = ac.createGain();
+    padGain.gain.value = 0.55;
+
+    noiseGain = ac.createGain();
+    noiseGain.gain.value = 0.0;
+
+    delay = ac.createDelay(2.0);
+    delay.delayTime.value = 0.33;
+    feedback = ac.createGain();
+    feedback.gain.value = 0.25;
+    delayFilter = ac.createBiquadFilter();
+    delayFilter.type = "lowpass";
+    delayFilter.frequency.value = 3200;
+    delayFilter.Q.value = 0.7;
+    delaySend = ac.createGain();
+    delaySend.gain.value = 0.18;
+
+    // Graph:
+    // pad/noise -> (master path) -> tilt -> comp -> destination
+    //                  \-> delaySend -> delay -> delayFilter -> feedback -> delay -> (back) + -> master path
+    padGain.connect(master);
+    noiseGain.connect(master);
+    master.connect(tilt);
+    tilt.connect(comp);
+    comp.connect(ac.destination);
+
+    master.connect(delaySend);
+    delaySend.connect(delay);
+    delay.connect(delayFilter);
+    delayFilter.connect(feedback);
+    feedback.connect(delay);
+    delayFilter.connect(master);
+
+    // Voices: slow evolving pad with gentle detune and moving bandpass filters.
+    voices = [];
+    const base = chord.calm;
+    const detunes = [-7, 5, 0];
+
+    for (let i = 0; i < 3; i++) {
+      const osc = ac.createOscillator();
+      osc.type = i === 0 ? "sine" : "triangle";
+      osc.frequency.value = base[i];
+      osc.detune.value = detunes[i];
+
+      const filter = ac.createBiquadFilter();
+      filter.type = "bandpass";
+      filter.frequency.value = 420 + i * 220;
+      filter.Q.value = 1.2 + i * 0.35;
+
+      const gain = ac.createGain();
+      gain.gain.value = 0.0;
+
+      const lfo = ac.createOscillator();
+      lfo.type = "sine";
+      lfo.frequency.value = 0.035 + i * 0.018;
+      const lfoGain = ac.createGain();
+      lfoGain.gain.value = 180 + i * 110;
+      lfo.connect(lfoGain);
+      lfoGain.connect(filter.frequency);
+
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(padGain);
+
+      osc.start();
+      lfo.start();
+
+      voices.push({ osc, gain, filter, lfo, lfoGain });
+    }
+
+    // Filtered noise shimmer
+    noiseSrc = ac.createBufferSource();
+    noiseSrc.buffer = makeNoiseBuffer(ac);
+    noiseSrc.loop = true;
+    noiseFilter = ac.createBiquadFilter();
+    noiseFilter.type = "highpass";
+    noiseFilter.frequency.value = 900;
+    noiseFilter.Q.value = 0.6;
+    noiseSrc.connect(noiseFilter);
+    noiseFilter.connect(noiseGain);
+    noiseSrc.start();
+
+    // Fade in gently once resumed
+    const t0 = now();
+    master.gain.setValueAtTime(0.0, t0);
+    master.gain.linearRampToValueAtTime(0.8, t0 + 1.6);
+  }
+
+  function update({ t, state, params: p }) {
+    if (!ac || !master || !padGain || !noiseGain || !tilt || !delay || !feedback || !delayFilter || !delaySend || !voices) return;
+    if (ac.state === "suspended") return;
+
+    const target = stateTargets[state] || stateTargets.calm;
+    const speed = target.speed;
+    const glow = target.glow;
+    const burst = target.burst;
+
+    // Sync to the same breathing logic driving the core.
+    const breathe = 0.5 + 0.5 * Math.sin(t * 0.62 * speed);
+    const breathe2 = 0.5 + 0.5 * Math.sin(t * 0.37 * speed + 1.7);
+    const pulse = 0.65 + 0.35 * Math.sin(t * (0.9 + target.drift * 0.7));
+
+    // Harmony shifts are subtle: more overtones appear as state rises.
+    const notes = chord[state] || chord.calm;
+    for (let i = 0; i < voices.length; i++) {
+      const v = voices[i];
+      const f = notes[Math.min(i, notes.length - 1)];
+      softSet(v.osc.frequency, f * (1 + 0.0025 * Math.sin(t * (0.07 + i * 0.03) + i)));
+      const vGain = (0.07 + i * 0.03) * (0.75 + 0.35 * glow) * (0.85 + 0.25 * breathe);
+      softSet(v.gain.gain, vGain, 0.2);
+      softSet(v.filter.frequency, (320 + i * 180) + (420 + 520 * glow) * (0.35 + 0.65 * breathe2), 0.22);
+      softSet(v.lfo.frequency, (0.03 + i * 0.02) * (0.7 + 0.55 * speed), 0.25);
+      softSet(v.lfoGain.gain, (120 + i * 95) * (0.7 + 0.75 * glow), 0.25);
+    }
+
+    // Noise shimmer grows with activity, stays very low in calm.
+    const shimmer = (state === "calm" ? 0.012 : state === "active" ? 0.03 : 0.055) * (0.7 + 0.5 * burst);
+    softSet(noiseGain.gain, shimmer * (0.75 + 0.25 * pulse), 0.25);
+    if (noiseFilter) softSet(noiseFilter.frequency, 700 + 1400 * glow * (0.5 + 0.5 * breathe2), 0.3);
+
+    // Overall color: darker in calm, slightly brighter with glow.
+    softSet(tilt.frequency, 5200 + 5200 * glow, 0.35);
+
+    // Echo field: deeper and slightly faster with state.
+    softSet(delay.delayTime, 0.42 - 0.1 * Math.min(1, (speed - 0.55) / 1.0), 0.25);
+    softSet(feedback.gain, 0.18 + 0.14 * glow + 0.1 * burst, 0.35);
+    softSet(delayFilter.frequency, 1800 + 2200 * glow, 0.35);
+    softSet(delaySend.gain, 0.08 + 0.14 * glow, 0.35);
+
+    // Gentle master breathing (keeps it musical and synced, not reactive "alert").
+    const base = 0.55 + 0.22 * glow;
+    const mod = 0.06 * (0.35 + 0.65 * burst) * (breathe * 0.6 + breathe2 * 0.4);
+    softSet(master.gain, Math.min(0.95, base + mod), 0.35);
+
+    // Use animation params as an additional, subtle constraint (prevents mismatch if tuned).
+    if (p) {
+      const extra = clamp01((p.glow - 0.65) / 1.0);
+      softSet(padGain.gain, 0.5 + 0.18 * extra, 0.35);
+    }
+  }
+
+  function suspendOnHidden() {
+    if (!ac) return;
+    if (document.hidden) ac.suspend().catch(() => {});
+    else ac.resume().catch(() => {});
+  }
+
+  document.addEventListener("visibilitychange", suspendOnHidden, { passive: true });
+
+  return {
+    get started() {
+      return started;
+    },
+    start() {
+      start();
+      if (ac && ac.state === "suspended") ac.resume().catch(() => {});
+    },
+    update,
+  };
+}
+
+const sound = createSoundEngine();
+function armSound() {
+  sound.start();
+  window.removeEventListener("pointerdown", armSound);
+  window.removeEventListener("keydown", armSoundKey);
+}
+function armSoundKey(e) {
+  if (e.key === " " || e.key === "Enter") armSound();
+}
+window.addEventListener("pointerdown", armSound, { passive: true });
+window.addEventListener("keydown", armSoundKey);
+
 const stateTargets = {
   calm: { speed: 0.55, glow: 0.7, drift: 0.55, burst: 0.25 },
   active: { speed: 1.0, glow: 1.05, drift: 1.0, burst: 0.55 },
@@ -314,6 +571,8 @@ function frame(now) {
 
   drawCore(t, params);
 
+  sound.update({ t, state: kehaiState, params });
+
   requestAnimationFrame(frame);
 }
 
@@ -346,4 +605,3 @@ window.KEHAI = {
 window.KEHAI = {
   updateFromAI
 };
-
