@@ -578,30 +578,37 @@ function frame(now) {
 
 requestAnimationFrame(frame);
 
+
+// Expose minimal hooks for future wiring (no network calls here).
+// ===============================
+// KEHAI External Interface (FINAL)
+// ===============================
+
 function normalizeState(state) {
   if (state === "calm" || state === "active" || state === "surge") return state;
   return null;
 }
 
-// Future interface: external AI unit calls this with { state: "calm" | "active" | "surge" }.
+// External AI / Phase2 calls this
 function updateFromAI(result) {
   const next = normalizeState(result?.state);
   if (!next) return;
   kehaiState = next;
 }
 
-// Expose minimal hooks for future wiring (no network calls here).
+// ✅ 単一・正式な公開API
 window.KEHAI = {
+  /** 現在の状態（読み取り専用） */
   get state() {
     return kehaiState;
   },
+
+  /** 手動切り替え（展示・デバッグ用） */
   setState(next) {
     const s = normalizeState(next);
     if (s) kehaiState = s;
   },
-  updateFromAI,
-};
 
-window.KEHAI = {
-  updateFromAI
+  /** Phase2 / Hugging Face / 外部AI 用 */
+  updateFromAI,
 };
